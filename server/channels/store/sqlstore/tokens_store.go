@@ -12,7 +12,6 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/shared/mlog"
-	"github.com/mattermost/mattermost/server/v8/channels/app/keycloakauth"
 	"github.com/mattermost/mattermost/server/v8/channels/store"
 )
 
@@ -54,7 +53,7 @@ func (s SqlTokenStore) Save(token *model.Token) error {
 
 func (s SqlTokenStore) Delete(token string) error {
 	if _, err := s.GetMaster().Exec("DELETE FROM Tokens WHERE Token = ?", token); err != nil {
-		return errors.Wrapf(err, "failed to delete Token with value %s", keycloakauth.RedactToken(token, false))
+		return errors.Wrapf(err, "failed to delete Token with value %s", token)
 	}
 	return nil
 }
@@ -70,11 +69,10 @@ func (s SqlTokenStore) GetByToken(tokenString string) (*model.Token, error) {
 	}
 
 	if err := s.GetReplica().Get(&token, query, args...); err != nil {
-		redacted := keycloakauth.RedactToken(tokenString, false)
 		if err == sql.ErrNoRows {
-			return nil, store.NewErrNotFound("Token", fmt.Sprintf("Token=%s", redacted))
+			return nil, store.NewErrNotFound("Token", fmt.Sprintf("Token=%s", tokenString))
 		}
-		return nil, errors.Wrapf(err, "failed to get Token with value %s", redacted)
+		return nil, errors.Wrapf(err, "failed to get Token with value %s", tokenString)
 	}
 
 	return &token, nil
@@ -87,7 +85,7 @@ func (s SqlTokenStore) ConsumeOnce(tokenType, tokenStr string) (*model.Token, er
 
 	if err := s.GetMaster().Get(&token, query, tokenType, tokenStr); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, store.NewErrNotFound("Token", keycloakauth.RedactToken(tokenStr, false))
+			return nil, store.NewErrNotFound("Token", tokenStr)
 		}
 		return nil, errors.Wrapf(err, "failed to consume token with type %s", tokenType)
 	}

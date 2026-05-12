@@ -285,31 +285,6 @@ func (v *Verifier) VerifyLogoutToken(ctx context.Context, tokenString string) (*
 	return &LogoutClaims{Subject: sub, SID: sid, JTI: jti}, nil
 }
 
-// RedactToken returns a safe placeholder for a bearer credential — JWT,
-// PAT, or legacy session token — so we never leak the raw token into log
-// output via NewAppError's i18n params or similar templated messages.
-// Without this, "Invalid session token={{.Token}}" expansions print the
-// full JWT, which is a usable bearer credential until exp.
-//
-// JWT-shaped tokens collapse to "<jwt>"; everything else collapses to
-// "<token len=N>" so log readers can still distinguish "user sent a
-// 26-char PAT" from "user sent garbage" without the credential.
-//
-// Debug-level override: when isDebug is true (operator explicitly opted
-// into verbose logging), the raw token is returned. This keeps local-dev
-// and on-call debugging workflows intact — credential exposure in those
-// scenarios is gated by the same access controls that gate the debug
-// log target. Pass the result of `logger.IsLevelEnabled(mlog.LvlDebug)`.
-func RedactToken(token string, isDebug bool) string {
-	if isDebug {
-		return token
-	}
-	if LooksLikeJWT(token) {
-		return "<jwt>"
-	}
-	return fmt.Sprintf("<token len=%d>", len(token))
-}
-
 // LooksLikeJWT is a cheap pre-check used by the session pipeline to
 // decide whether to even attempt JWT verification on an incoming bearer
 // token. Three non-empty dot-separated segments and a reasonable upper

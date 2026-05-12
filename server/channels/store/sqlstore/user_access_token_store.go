@@ -11,7 +11,6 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost/server/public/model"
-	"github.com/mattermost/mattermost/server/v8/channels/app/keycloakauth"
 	"github.com/mattermost/mattermost/server/v8/channels/store"
 )
 
@@ -165,14 +164,10 @@ func (s SqlUserAccessTokenStore) GetByToken(tokenString string) (*model.UserAcce
 	query := s.userAccessTokensSelectQuery.Where(sq.Eq{"Token": tokenString})
 
 	if err := s.GetReplica().GetBuilder(&token, query); err != nil {
-		// Always redact — this error message surfaces into MM's request
-		// log via the GetSession wrapper. The store has no logger to
-		// consult for the debug-level override, so fail closed.
-		redacted := keycloakauth.RedactToken(tokenString, false)
 		if err == sql.ErrNoRows {
-			return nil, store.NewErrNotFound("UserAccessToken", fmt.Sprintf("token=%s", redacted))
+			return nil, store.NewErrNotFound("UserAccessToken", fmt.Sprintf("token=%s", tokenString))
 		}
-		return nil, errors.Wrapf(err, "failed to get UserAccessToken with token=%s", redacted)
+		return nil, errors.Wrapf(err, "failed to get UserAccessToken with token=%s", tokenString)
 	}
 
 	return &token, nil

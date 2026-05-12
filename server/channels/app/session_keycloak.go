@@ -55,7 +55,7 @@ func (a *App) tryKeycloakJWTSession(rctx request.CTX, tokenString string) (*mode
 	claims, err := v.Verify(rctx.Context(), tokenString)
 	if err != nil {
 		rctx.Logger().Debug("Keycloak JWT verification failed", mlog.Err(err))
-		return nil, model.NewAppError("tryKeycloakJWTSession", "api.context.invalid_token.error", map[string]any{"Token": redactToken(rctx.Logger(), tokenString)}, "keycloak: "+err.Error(), http.StatusUnauthorized)
+		return nil, model.NewAppError("tryKeycloakJWTSession", "api.context.invalid_token.error", map[string]any{"Token": tokenString}, "keycloak: "+err.Error(), http.StatusUnauthorized)
 	}
 
 	user, appErr := a.findOrProvisionKeycloakUser(rctx, claims)
@@ -200,6 +200,28 @@ func IsKeycloakJWTSession(s *model.Session) bool {
 	return s != nil && s.Props[model.SessionPropType] == model.SessionTypeKeycloakJWT
 }
 
+// tryKeycloakOrUserAccessToken implements the dispatch order used by
+// (*App).GetSession when no live session is cached for a bearer token:
+// first try the Keycloak JWT path (no-op when disabled or the token
+// isn't a JWT), then fall back to the user-access-token path.
+// Centralizing this in one wrapper lets GetSession patch a single call
+// site instead of inlining the if/else block.
+func (a *App) tryKeycloakOrUserAccessToken(rctx request.CTX, token string) (*model.Session, *model.AppError) {
+	if s, err := a.tryKeycloakJWTSession(rctx, token); s != nil || err != nil {
+		return s, err
+	}
+	return a.createSessionForUserAccessToken(rctx, token)
+}
+
+// isExemptFromIdleTimeout reports whether s should skip MM's
+// SessionIdleTimeoutInMinutes enforcement. Upstream MM already exempts
+// user-access-token sessions; Keycloak JWT sessions are additionally
+// exempt because their idle/absolute lifetime is governed by Keycloak,
+// not MM's idle counter.
+func isExemptFromIdleTimeout(s *model.Session) bool {
+	return s.Props[model.SessionPropType] == model.SessionTypeUserAccessToken || IsKeycloakJWTSession(s)
+}
+
 // --- verifier lifecycle -----------------------------------------------
 
 // GetOrBuildKeycloakVerifier returns the shared Keycloak JWT verifier,
@@ -325,14 +347,6 @@ func rolesForJWTSession(claims *keycloakauth.VerifiedClaims, user *model.User) s
 }
 
 // --- helpers ----------------------------------------------------------
-
-// redactToken wraps keycloakauth.RedactToken with the package-local
-// convention of pulling debug-level state from the supplied logger so
-// call-sites stay one-line. A nil logger fails closed (always redact).
-func redactToken(logger mlog.LoggerIFace, token string) string {
-	debug := logger != nil && logger.IsLevelEnabled(mlog.LvlDebug)
-	return keycloakauth.RedactToken(token, debug)
-}
 
 func synthesizeSessionID(tokenString string) string {
 	sum := sha256.Sum256([]byte("kc-jwt|" + tokenString))

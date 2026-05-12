@@ -13,7 +13,6 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/shared/request"
-	"github.com/mattermost/mattermost/server/v8/channels/app/keycloakauth"
 	"github.com/mattermost/mattermost/server/v8/channels/store"
 )
 
@@ -101,13 +100,11 @@ func (me SqlSessionStore) Get(rctx request.CTX, sessionIdOrToken string) (*model
 	}
 
 	err = me.DBXFromContext(rctx.Context()).Select(&sessions, sql, args...)
-	// sessionIdOrToken may be a raw bearer (PAT or JWT) when GetSession's
-	// cache-miss path falls through here; redact in any log-bound string.
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to find Sessions with sessionIdOrToken=%s", keycloakauth.RedactToken(sessionIdOrToken, false))
+		return nil, errors.Wrapf(err, "failed to find Sessions with sessionIdOrToken=%s", sessionIdOrToken)
 	}
 	if len(sessions) == 0 {
-		return nil, store.NewErrNotFound("Session", fmt.Sprintf("sessionIdOrToken=%s", keycloakauth.RedactToken(sessionIdOrToken, false)))
+		return nil, store.NewErrNotFound("Session", fmt.Sprintf("sessionIdOrToken=%s", sessionIdOrToken))
 	}
 	session := sessions[0]
 
@@ -274,7 +271,7 @@ func (me SqlSessionStore) UpdateExpiredNotify(sessionId string, notified bool) e
 func (me SqlSessionStore) Remove(sessionIdOrToken string) error {
 	_, err := me.GetMaster().Exec("DELETE FROM Sessions WHERE Id = ? Or Token = ?", sessionIdOrToken, sessionIdOrToken)
 	if err != nil {
-		return errors.Wrapf(err, "failed to delete Session with sessionIdOrToken=%s", keycloakauth.RedactToken(sessionIdOrToken, false))
+		return errors.Wrapf(err, "failed to delete Session with sessionIdOrToken=%s", sessionIdOrToken)
 	}
 	return nil
 }
