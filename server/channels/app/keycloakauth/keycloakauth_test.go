@@ -500,14 +500,30 @@ func TestVerifyLogoutToken_MissingSubAndSid(t *testing.T) {
 	}
 }
 
-func TestVerifyLogoutToken_WrongAudience(t *testing.T) {
+// VerifyLogoutToken intentionally does NOT validate `aud` — per OIDC
+// Back-Channel Logout §2.4, aud carries the originating client_id, which
+// for a multi-client KC realm (mobile_app, mattermost-gitlab, …) is
+// operational metadata rather than a security gate. Signature + iss
+// already attest that KC issued the token, and access-token aud filtering
+// on the *bearer* path (Verify) keeps the JWT-bearer trust boundary in
+// place. This test pins the relaxed behavior so it isn't accidentally
+// re-tightened.
+func TestVerifyLogoutToken_AcceptsAnyAudience(t *testing.T) {
 	idp := newFakeIdP(t)
 	defer idp.Close()
 	v := newVerifier(idp, nil)
 
-	tok := idp.Mint(t, baseLogoutClaims(idp, "someone-else"))
-	if _, err := v.VerifyLogoutToken(context.Background(), tok); err == nil {
-		t.Fatal("expected error for wrong audience")
+	for _, aud := range []string{"mychat-client", "some-other-client", "mobile_app", ""} {
+		t.Run("aud="+aud, func(t *testing.T) {
+			claims := baseLogoutClaims(idp, aud)
+			if aud == "" {
+				delete(claims, "aud")
+			}
+			tok := idp.Mint(t, claims)
+			if _, err := v.VerifyLogoutToken(context.Background(), tok); err != nil {
+				t.Fatalf("logout token with aud=%q should verify: %v", aud, err)
+			}
+		})
 	}
 }
 

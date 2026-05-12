@@ -178,7 +178,7 @@ const backchannelLogoutEvent = "http://schemas.openid.net/event/backchannel-logo
 // posted by Keycloak when a session is terminated). It reuses the same
 // JWKS plumbing as Verify but applies the spec-specific rules from §2.4:
 //
-//   - iss / aud / signature: same as an access token.
+//   - iss / signature: same as an access token.
 //   - `events` MUST contain backchannelLogoutEvent.
 //   - `iat` MUST be present.
 //   - `jti` MUST be present.
@@ -186,12 +186,21 @@ const backchannelLogoutEvent = "http://schemas.openid.net/event/backchannel-logo
 //   - At least one of `sub` or `sid` MUST be present.
 //   - `exp` is NOT required (and is typically absent).
 //
+// Audience: per OIDC Back-Channel Logout §2.4 the `aud` value is the
+// originating client_id (the RP whose session is being terminated). For a
+// JWT-bearer setup where MM accepts tokens from multiple KC clients
+// (mobile_app, mattermost-gitlab, fan-out via api-management) the aud
+// claim is operational metadata, not a security gate — the signature +
+// trusted `iss` already attest that KC issued this logout. We log the
+// claim but do not reject on its value; any client whose tokens MM
+// otherwise accepts can fire a backchannel-logout for that same user.
+//
 // On any error the returned *LogoutClaims is nil.
 func (v *Verifier) VerifyLogoutToken(ctx context.Context, tokenString string) (*LogoutClaims, error) {
+	// Audience is intentionally NOT checked here — see function doc.
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}),
 		jwt.WithIssuer(v.cfg.Issuer),
-		jwt.WithAudience(v.cfg.Audience),
 		jwt.WithLeeway(v.cfg.ClockSkew),
 	)
 
