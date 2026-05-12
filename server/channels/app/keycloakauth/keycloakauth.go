@@ -109,6 +109,7 @@ type VerifiedClaims struct {
 	Email             string
 	PreferredUsername string
 	Name              string
+	IssuedAt          time.Time
 	ExpiresAt         time.Time
 	// MattermostRoles is the result of the RolesClaim → AdminRoles
 	// mapping. It is the space-separated string suitable for assignment
@@ -535,6 +536,10 @@ func (v *Verifier) extract(claims jwt.MapClaims) (*VerifiedClaims, error) {
 	if expAt, err := claims.GetExpirationTime(); err == nil && expAt != nil {
 		exp = expAt.Time
 	}
+	var iat time.Time
+	if iatAt, err := claims.GetIssuedAt(); err == nil && iatAt != nil {
+		iat = iatAt.Time
+	}
 
 	kcRoles := lookupStringSlice(claims, v.cfg.RolesClaim)
 	mmRoles := mapRoles(kcRoles, v.cfg.AdminRoles, v.cfg.DefaultRoles)
@@ -544,6 +549,7 @@ func (v *Verifier) extract(claims jwt.MapClaims) (*VerifiedClaims, error) {
 		Email:             email,
 		PreferredUsername: uname,
 		Name:              name,
+		IssuedAt:          iat,
 		ExpiresAt:         exp,
 		MattermostRoles:   mmRoles,
 	}, nil

@@ -170,6 +170,9 @@ func TestVerify_HappyPath(t *testing.T) {
 	if got.MattermostRoles != "system_user" {
 		t.Errorf("MattermostRoles = %q, want plain system_user (no admin role on this token)", got.MattermostRoles)
 	}
+	if got.IssuedAt.IsZero() {
+		t.Error("IssuedAt zero — must be populated from JWT iat claim for the tokens-not-before gate in session_keycloak.go")
+	}
 	if got.ExpiresAt.IsZero() {
 		t.Error("ExpiresAt zero")
 	}

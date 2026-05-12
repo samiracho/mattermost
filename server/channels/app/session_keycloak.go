@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/shared/mlog"
@@ -65,6 +66,16 @@ func (a *App) tryKeycloakJWTSession(rctx request.CTX, tokenString string) (*mode
 		return nil, model.NewAppError("tryKeycloakJWTSession", "api.context.invalid_token.error", nil, "keycloak: user is deactivated", http.StatusUnauthorized)
 	}
 
+	// "Tokens-not-before" gate: when api-management forwards a Keycloak
+	// backchannel-logout for this user (scope='all' / admin kick / disable
+	// / hard-delete), handleKeycloakBackchannelLogout writes the revocation
+	// moment into user.Props[KeycloakTokensNotBeforePropKey]. Any JWT whose
+	// iat is at or before that wall-clock second is rejected here — the
+	// JWT-bearer equivalent of deleting a DB-backed session row.
+	if isJWTIssuedBeforeKeycloakRevocation(user.Props[KeycloakTokensNotBeforePropKey], claims.IssuedAt) {
+		return nil, model.NewAppError("tryKeycloakJWTSession", "api.context.invalid_token.error", nil, "keycloak: token issued before user's tokens_not_before", http.StatusUnauthorized)
+	}
+
 	// Build a synthetic, non-persisted session. The cache layer will
 	// hold it for ServiceSettings.SessionCacheInMinutes; once the JWT's
 	// own exp passes, model.Session.IsExpired() short-circuits subsequent
@@ -107,6 +118,78 @@ func (a *App) tryKeycloakJWTSession(rctx request.CTX, tokenString string) (*mode
 		rctx.Logger().Warn("Failed to add Keycloak JWT session to cache", mlog.Err(err), mlog.String("user_id", user.Id))
 	}
 	return session, nil
+}
+
+// KeycloakTokensNotBeforePropKey is the user.Props entry storing the
+// most recent revocation moment (epoch ms) for this user's Keycloak JWTs.
+// Any JWT whose iat is at or before floor(value/1000) is rejected by
+// tryKeycloakJWTSession. Persisted on the user row, so revocation
+// survives MM restart and is naturally cluster-safe via
+// InvalidateCacheForUser broadcast. See api-management/docs/session-revocation.md
+// for the cross-service revocation flow.
+const KeycloakTokensNotBeforePropKey = "keycloak_tokens_not_before_ms"
+
+// isJWTIssuedBeforeKeycloakRevocation parses the raw Props value (stringified
+// epoch ms) and reports whether the supplied JWT iat falls at or before the
+// revocation second (`iat.Unix() <= nbfMs/1000`).
+//
+// Same-second iat is treated as revoked. JWT iat is second-resolution while
+// the revocation moment is captured in ms, so within the second of revocation
+// we can't reliably distinguish "minted 500ms before logout" from "re-login
+// 50ms after logout"; defaulting to "revoked" is the safe choice. A real
+// re-login takes well over a second (KC redirect + OAuth handshake), so the
+// post-revoke fresh token's iat is at least one second later and admitted.
+// Consistent with packages/api-shared/src/auth/sessionDenylist.ts.
+//
+// Defensive against corruption: empty / non-numeric Props returns false, so a
+// bad write can't lock the user out permanently — the cost is just one missed
+// revocation, which is bounded by the access-token exp (5 min).
+func isJWTIssuedBeforeKeycloakRevocation(propsNbfRaw string, iat time.Time) bool {
+	if propsNbfRaw == "" || iat.IsZero() {
+		return false
+	}
+	nbfMs, err := strconv.ParseInt(propsNbfRaw, 10, 64)
+	if err != nil {
+		return false
+	}
+	return iat.Unix() <= nbfMs/1000
+}
+
+// MarkKeycloakTokensRevoked persists user.Props[KeycloakTokensNotBeforePropKey]
+// and forces a cluster-wide user-cache invalidation so peer replicas re-read
+// the row on the next request. Exported so the OIDC back-channel logout
+// handler in package web can call it.
+//
+// Caller passes the already-loaded *model.User from GetUserByAuth — we do not
+// reload. The read-modify-write race window for concurrent revocations is
+// benign: Store().User().Update is a blind UPDATE (no compare-and-set), and
+// "later writer wins" is the correct monotonic semantics — the most recent
+// revocation timestamp ends up on the row regardless of arrival order. The
+// local prev >= nbfMs check is a perf optimisation to skip redundant writes,
+// not a correctness gate.
+//
+// Direct Store().User().Update is intentional — we deliberately bypass
+// App.UpdateUser to avoid plugin hooks, "user_updated" websocket events, and
+// audit-log entries that don't belong on a backchannel-logout signal.
+func (a *App) MarkKeycloakTokensRevoked(rctx request.CTX, user *model.User, nbfMs int64) *model.AppError {
+	if user == nil {
+		return model.NewAppError("MarkKeycloakTokensRevoked", "app.user.missing.app_error", nil, "", http.StatusBadRequest)
+	}
+	if user.Props == nil {
+		user.Props = model.StringMap{}
+	}
+	if existing := user.Props[KeycloakTokensNotBeforePropKey]; existing != "" {
+		if prev, perr := strconv.ParseInt(existing, 10, 64); perr == nil && prev >= nbfMs {
+			return nil
+		}
+	}
+	user.Props[KeycloakTokensNotBeforePropKey] = strconv.FormatInt(nbfMs, 10)
+
+	if _, err := a.Srv().Store().User().Update(rctx, user, true); err != nil {
+		return model.NewAppError("MarkKeycloakTokensRevoked", "app.user.update.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+	}
+	a.InvalidateCacheForUser(user.Id)
+	return nil
 }
 
 // IsKeycloakJWTSession reports whether a session was produced by the
