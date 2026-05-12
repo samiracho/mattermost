@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/mattermost/mattermost/server/public/model"
 )
 
 // fakeIdP runs an httptest server exposing /.well-known/openid-configuration
@@ -248,6 +250,181 @@ func TestVerify_WrongIssuer(t *testing.T) {
 	token := idp.Mint(t, baseClaims(idp, "mychat-client"))
 	if _, err := v.Verify(context.Background(), token); err == nil {
 		t.Fatal("expected error for wrong issuer")
+	}
+}
+
+// AdditionalIssuers covers the multi-host setup where the same realm is
+// reachable under several hostnames (local-dev: localhost / 10.0.2.2 / LAN
+// IP). A token whose iss matches the *primary* Issuer or any entry in
+// AdditionalIssuers should verify; one outside both lists must be rejected.
+func TestVerify_AdditionalIssuers_PrimaryMatches(t *testing.T) {
+	idp := newFakeIdP(t)
+	defer idp.Close()
+	v := newVerifier(idp, func(c *Config) {
+		c.AdditionalIssuers = []string{"https://other.example", "https://lan-ip.example"}
+	})
+
+	token := idp.Mint(t, baseClaims(idp, "mychat-client"))
+	if _, err := v.Verify(context.Background(), token); err != nil {
+		t.Fatalf("expected primary issuer to verify alongside AdditionalIssuers, got: %v", err)
+	}
+}
+
+func TestVerify_AdditionalIssuers_AltMatches(t *testing.T) {
+	idp := newFakeIdP(t)
+	defer idp.Close()
+	// Primary Issuer is something else; a token minted with the IdP's iss
+	// (set as an additional issuer) should still verify.
+	v := newVerifier(idp, func(c *Config) {
+		c.Issuer = "https://primary.example"
+		c.AdditionalIssuers = []string{idp.Issuer()}
+	})
+
+	token := idp.Mint(t, baseClaims(idp, "mychat-client"))
+	if _, err := v.Verify(context.Background(), token); err != nil {
+		t.Fatalf("expected additional issuer to verify, got: %v", err)
+	}
+}
+
+func TestVerify_AdditionalIssuers_UnknownStillRejected(t *testing.T) {
+	idp := newFakeIdP(t)
+	defer idp.Close()
+	v := newVerifier(idp, func(c *Config) {
+		c.Issuer = "https://primary.example"
+		c.AdditionalIssuers = []string{"https://only-this.example"}
+	})
+
+	token := idp.Mint(t, baseClaims(idp, "mychat-client"))
+	if _, err := v.Verify(context.Background(), token); err == nil {
+		t.Fatal("expected error for iss outside primary + additional allowlist")
+	}
+}
+
+func TestVerify_WildcardIssuers_AcceptsAnyHost(t *testing.T) {
+	idp := newFakeIdP(t)
+	defer idp.Close()
+	// With wildcard on, any iss verifies as long as signature + audience hold.
+	v := newVerifier(idp, func(c *Config) {
+		c.Issuer = "https://does-not-match.example"
+		c.WildcardIssuers = true
+	})
+
+	token := idp.Mint(t, baseClaims(idp, "mychat-client"))
+	if _, err := v.Verify(context.Background(), token); err != nil {
+		t.Fatalf("expected wildcard to accept any iss, got: %v", err)
+	}
+}
+
+func TestVerify_MissingIssuerClaim(t *testing.T) {
+	idp := newFakeIdP(t)
+	defer idp.Close()
+	v := newVerifier(idp, nil)
+
+	claims := baseClaims(idp, "mychat-client")
+	delete(claims, "iss")
+	token := idp.Mint(t, claims)
+	if _, err := v.Verify(context.Background(), token); err == nil {
+		t.Fatal("expected error for token missing iss claim")
+	}
+}
+
+// RedactToken protects bearer credentials from leaking into log output via
+// NewAppError i18n params. Default behaviour: JWT-shaped tokens collapse
+// to "<jwt>"; everything else collapses to "<token len=N>". A Debug
+// override returns the raw token so operators can opt into verbose
+// debugging in local dev without code changes.
+
+func TestRedactToken_JWTCollapsesToPlaceholder(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.signaturesignaturesig"
+	got := RedactToken(jwt, false)
+	if got != "<jwt>" {
+		t.Fatalf("expected <jwt> placeholder, got %q", got)
+	}
+	if strings.Contains(got, "alice") || strings.Contains(got, "signature") {
+		t.Fatalf("placeholder %q must not echo any token contents", got)
+	}
+}
+
+func TestRedactToken_PATShowsLengthOnly(t *testing.T) {
+	pat := strings.Repeat("a", 26)
+	got := RedactToken(pat, false)
+	if got != "<token len=26>" {
+		t.Fatalf("expected <token len=26>, got %q", got)
+	}
+	if strings.Contains(got, pat) {
+		t.Fatalf("placeholder must not contain the raw token")
+	}
+}
+
+func TestRedactToken_EmptyAndShortInputs(t *testing.T) {
+	cases := []string{"", "x", "two.segments", "....."}
+	for _, in := range cases {
+		got := RedactToken(in, false)
+		if !strings.HasPrefix(got, "<token len=") {
+			t.Fatalf("input %q → unexpected placeholder %q", in, got)
+		}
+		if in != "" && strings.Contains(got, in) {
+			t.Fatalf("placeholder %q contains the raw input %q", got, in)
+		}
+	}
+}
+
+// A malformed JWT (3 segments, middle empty) must not be misclassified as a
+// real JWT — LooksLikeJWT rejects empty segments, so the redactor should
+// fall through to the len=N branch rather than echo the token shape.
+func TestRedactToken_MalformedJWTNotMislabelled(t *testing.T) {
+	got := RedactToken("header..signature", false)
+	if got == "<jwt>" {
+		t.Fatalf("malformed token must not be labelled <jwt>")
+	}
+	if !strings.HasPrefix(got, "<token len=") {
+		t.Fatalf("expected len=N placeholder, got %q", got)
+	}
+}
+
+// Debug override: operators with debug logging enabled get the raw token
+// (local dev + on-call workflows). Same access controls that gate the
+// debug log target gate the credential.
+func TestRedactToken_DebugOverrideReturnsRaw(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.signaturesignaturesig"
+	got := RedactToken(jwt, true)
+	if got != jwt {
+		t.Fatalf("debug=true should return raw token, got %q", got)
+	}
+}
+
+// ConfigFromModel collapses Issuers (CSV string) into AdditionalIssuers
+// ([]string) and flips WildcardIssuers when "*" appears — this is the
+// integration hop the runtime uses, so cover it directly.
+func TestConfigFromModel_IssuersCSV(t *testing.T) {
+	primary := "http://localhost:8080/keycloak/realms/copythat"
+	issuers := "http://10.0.2.2:8080/keycloak/realms/copythat, http://192.168.1.165:8080/keycloak/realms/copythat"
+	aud := "mattermost-api"
+	disc := "http://keycloak:8080/keycloak/realms/copythat/.well-known/openid-configuration"
+
+	cfg := ConfigFromModel(&model.KeycloakSettings{
+		Issuer:            &primary,
+		Issuers:           &issuers,
+		Audience:          &aud,
+		DiscoveryEndpoint: &disc,
+	})
+
+	if len(cfg.AdditionalIssuers) != 2 {
+		t.Fatalf("expected 2 additional issuers, got %v", cfg.AdditionalIssuers)
+	}
+	if cfg.WildcardIssuers {
+		t.Fatal("WildcardIssuers should be false without '*'")
+	}
+
+	wildcard := "*"
+	cfg = ConfigFromModel(&model.KeycloakSettings{
+		Issuer:            &primary,
+		Issuers:           &wildcard,
+		Audience:          &aud,
+		DiscoveryEndpoint: &disc,
+	})
+	if !cfg.WildcardIssuers {
+		t.Fatal("WildcardIssuers should be true when '*' is in CSV")
 	}
 }
 

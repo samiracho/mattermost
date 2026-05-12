@@ -54,7 +54,7 @@ func (a *App) tryKeycloakJWTSession(rctx request.CTX, tokenString string) (*mode
 	claims, err := v.Verify(rctx.Context(), tokenString)
 	if err != nil {
 		rctx.Logger().Debug("Keycloak JWT verification failed", mlog.Err(err))
-		return nil, model.NewAppError("tryKeycloakJWTSession", "api.context.invalid_token.error", map[string]any{"Token": "<jwt>"}, "keycloak: "+err.Error(), http.StatusUnauthorized)
+		return nil, model.NewAppError("tryKeycloakJWTSession", "api.context.invalid_token.error", map[string]any{"Token": redactToken(rctx.Logger(), tokenString)}, "keycloak: "+err.Error(), http.StatusUnauthorized)
 	}
 
 	user, appErr := a.findOrProvisionKeycloakUser(rctx, claims)
@@ -82,6 +82,26 @@ func (a *App) tryKeycloakJWTSession(rctx request.CTX, tokenString string) (*mode
 		session.AddProp(model.SessionPropIsBot, model.SessionPropIsBotValue)
 	}
 	session.AddProp(model.SessionPropIsGuest, strconv.FormatBool(user.IsGuest()))
+
+	// Mirror SqlSessionStore.Save: load TeamMembers onto the session so
+	// (*App).SessionHasPermissionToTeam can resolve team_user/team_admin
+	// roles without a per-request team lookup. Without this, every team
+	// permission check falls through to the user-level role set (which
+	// doesn't carry team scope), so non-admin JWT users get 403 on
+	// every team-scoped endpoint (e.g. /users/me/teams/{id}/channels).
+	// Errors are non-fatal — log and proceed; downstream checks will fall
+	// back to the user-role path.
+	teamMembers, tmErr := a.Srv().Store().Team().GetTeamsForUser(rctx, user.Id, "", true)
+	if tmErr != nil {
+		rctx.Logger().Warn("Failed to load TeamMembers for Keycloak JWT session", mlog.Err(tmErr), mlog.String("user_id", user.Id))
+	} else {
+		session.TeamMembers = make([]*model.TeamMember, 0, len(teamMembers))
+		for _, tm := range teamMembers {
+			if tm.DeleteAt == 0 {
+				session.TeamMembers = append(session.TeamMembers, tm)
+			}
+		}
+	}
 
 	if err := a.ch.srv.platform.AddSessionToCache(session); err != nil {
 		rctx.Logger().Warn("Failed to add Keycloak JWT session to cache", mlog.Err(err), mlog.String("user_id", user.Id))
@@ -135,6 +155,7 @@ func keycloakFingerprint(s *model.KeycloakSettings) string {
 	add(s.DiscoveryEndpoint)
 	add(s.JWKSEndpoint)
 	add(s.Issuer)
+	add(s.Issuers)
 	add(s.Audience)
 	add(s.UserIDClaim)
 	add(s.EmailClaim)
@@ -221,6 +242,14 @@ func rolesForJWTSession(claims *keycloakauth.VerifiedClaims, user *model.User) s
 }
 
 // --- helpers ----------------------------------------------------------
+
+// redactToken wraps keycloakauth.RedactToken with the package-local
+// convention of pulling debug-level state from the supplied logger so
+// call-sites stay one-line. A nil logger fails closed (always redact).
+func redactToken(logger mlog.LoggerIFace, token string) string {
+	debug := logger != nil && logger.IsLevelEnabled(mlog.LvlDebug)
+	return keycloakauth.RedactToken(token, debug)
+}
 
 func synthesizeSessionID(tokenString string) string {
 	sum := sha256.Sum256([]byte("kc-jwt|" + tokenString))

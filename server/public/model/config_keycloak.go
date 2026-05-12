@@ -19,8 +19,16 @@ type KeycloakSettings struct {
 	Enable             *bool   `access:"authentication_openid"`
 	DiscoveryEndpoint  *string `access:"authentication_openid"` // telemetry: none
 	JWKSEndpoint       *string `access:"authentication_openid"` // telemetry: none; optional override, derived from discovery if empty
-	Issuer             *string `access:"authentication_openid"` // telemetry: none; expected "iss" claim
-	Audience           *string `access:"authentication_openid"` // telemetry: none; expected "aud" claim (Keycloak client_id)
+	Issuer             *string `access:"authentication_openid"` // telemetry: none; primary expected "iss" claim
+	// Issuers is an optional comma-separated allowlist of *additional*
+	// accepted "iss" claim values, for environments where the same Keycloak
+	// realm is reachable under multiple hostnames (e.g. local-dev: localhost,
+	// 10.0.2.2, LAN IP). The literal value "*" disables the iss host check
+	// entirely — signature + audience still gate the token, but any iss is
+	// accepted. Pin to explicit hosts in production. Empty by default →
+	// behaviour identical to the canonical single-issuer check.
+	Issuers          *string `access:"authentication_openid"` // telemetry: none
+	Audience         *string `access:"authentication_openid"` // telemetry: none; expected "aud" claim (Keycloak client_id)
 	UserIDClaim        *string `access:"authentication_openid"` // telemetry: none; default "sub"
 	EmailClaim         *string `access:"authentication_openid"` // telemetry: none; default "email"
 	UsernameClaim      *string `access:"authentication_openid"` // telemetry: none; default "preferred_username"
@@ -53,6 +61,9 @@ func (s *KeycloakSettings) SetDefaults() {
 	}
 	if s.Issuer == nil {
 		s.Issuer = NewPointer("")
+	}
+	if s.Issuers == nil {
+		s.Issuers = NewPointer("")
 	}
 	if s.Audience == nil {
 		s.Audience = NewPointer("")

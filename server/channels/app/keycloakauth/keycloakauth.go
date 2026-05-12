@@ -41,6 +41,15 @@ type Config struct {
 	DiscoveryEndpoint  string
 	JWKSEndpoint       string
 	Issuer             string
+	// AdditionalIssuers is an optional allowlist of extra "iss" claim values
+	// accepted alongside Issuer. If any entry equals "*" the iss host check
+	// is disabled entirely (signature + audience still gate the token). Use
+	// for local dev where the same realm is reachable under multiple
+	// hostnames (localhost, 10.0.2.2, LAN IP); pin to specific hosts in prod.
+	AdditionalIssuers  []string
+	// WildcardIssuers is derived from AdditionalIssuers containing "*".
+	// Cached on the Config so Verify doesn't re-scan the slice per request.
+	WildcardIssuers    bool
 	Audience           string
 	UserIDClaim        string
 	EmailClaim         string
@@ -63,10 +72,20 @@ type Config struct {
 func ConfigFromModel(s *model.KeycloakSettings) Config {
 	cs := derefInt(s.ClockSkewSeconds, 30)
 	rm := derefInt(s.JWKSRefreshMinutes, 60)
+	addl := splitCSV(derefStr(s.Issuers))
+	wildcard := false
+	for _, v := range addl {
+		if v == "*" {
+			wildcard = true
+			break
+		}
+	}
 	return Config{
 		DiscoveryEndpoint: derefStr(s.DiscoveryEndpoint),
 		JWKSEndpoint:      derefStr(s.JWKSEndpoint),
 		Issuer:            derefStr(s.Issuer),
+		AdditionalIssuers: addl,
+		WildcardIssuers:   wildcard,
 		Audience:          derefStr(s.Audience),
 		UserIDClaim:       firstNonEmpty(derefStr(s.UserIDClaim), "sub"),
 		EmailClaim:        firstNonEmpty(derefStr(s.EmailClaim), "email"),
@@ -134,9 +153,12 @@ func New(cfg Config) *Verifier {
 // On any error the returned *VerifiedClaims is nil and the error is
 // suitable for translating to a 401.
 func (v *Verifier) Verify(ctx context.Context, tokenString string) (*VerifiedClaims, error) {
+	// We deliberately *don't* pass jwt.WithIssuer here — the underlying
+	// library only supports a single allowed issuer. The post-parse
+	// issuerAllowed() check covers both the canonical Issuer and the
+	// AdditionalIssuers allowlist (or wildcard).
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}),
-		jwt.WithIssuer(v.cfg.Issuer),
 		jwt.WithAudience(v.cfg.Audience),
 		jwt.WithLeeway(v.cfg.ClockSkew),
 		jwt.WithExpirationRequired(),
@@ -156,6 +178,9 @@ func (v *Verifier) Verify(ctx context.Context, tokenString string) (*VerifiedCla
 	claims, ok := tok.Claims.(jwt.MapClaims)
 	if !ok {
 		return nil, errors.New("keycloak: unexpected claims type")
+	}
+	if err := v.checkIssuer(claims); err != nil {
+		return nil, err
 	}
 	return v.extract(claims)
 }
@@ -197,10 +222,11 @@ const backchannelLogoutEvent = "http://schemas.openid.net/event/backchannel-logo
 //
 // On any error the returned *LogoutClaims is nil.
 func (v *Verifier) VerifyLogoutToken(ctx context.Context, tokenString string) (*LogoutClaims, error) {
+	// As in Verify(), iss is checked manually below via issuerAllowed() so
+	// the multi-host allowlist applies to backchannel logout tokens too.
 	// Audience is intentionally NOT checked here — see function doc.
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}),
-		jwt.WithIssuer(v.cfg.Issuer),
 		jwt.WithLeeway(v.cfg.ClockSkew),
 	)
 
@@ -218,6 +244,9 @@ func (v *Verifier) VerifyLogoutToken(ctx context.Context, tokenString string) (*
 	claims, ok := tok.Claims.(jwt.MapClaims)
 	if !ok {
 		return nil, errors.New("keycloak: unexpected claims type")
+	}
+	if err := v.checkIssuer(claims); err != nil {
+		return nil, err
 	}
 
 	if _, ok := claims["nonce"]; ok {
@@ -253,6 +282,31 @@ func (v *Verifier) VerifyLogoutToken(ctx context.Context, tokenString string) (*
 	}
 
 	return &LogoutClaims{Subject: sub, SID: sid, JTI: jti}, nil
+}
+
+// RedactToken returns a safe placeholder for a bearer credential — JWT,
+// PAT, or legacy session token — so we never leak the raw token into log
+// output via NewAppError's i18n params or similar templated messages.
+// Without this, "Invalid session token={{.Token}}" expansions print the
+// full JWT, which is a usable bearer credential until exp.
+//
+// JWT-shaped tokens collapse to "<jwt>"; everything else collapses to
+// "<token len=N>" so log readers can still distinguish "user sent a
+// 26-char PAT" from "user sent garbage" without the credential.
+//
+// Debug-level override: when isDebug is true (operator explicitly opted
+// into verbose logging), the raw token is returned. This keeps local-dev
+// and on-call debugging workflows intact — credential exposure in those
+// scenarios is gated by the same access controls that gate the debug
+// log target. Pass the result of `logger.IsLevelEnabled(mlog.LvlDebug)`.
+func RedactToken(token string, isDebug bool) string {
+	if isDebug {
+		return token
+	}
+	if LooksLikeJWT(token) {
+		return "<jwt>"
+	}
+	return fmt.Sprintf("<token len=%d>", len(token))
 }
 
 // LooksLikeJWT is a cheap pre-check used by the session pipeline to
@@ -544,6 +598,30 @@ func lookupStringSlice(claims jwt.MapClaims, path string) []string {
 		}
 	}
 	return out
+}
+
+// checkIssuer enforces the iss-claim allowlist. The upstream jwt parser only
+// supports a single allowed issuer via jwt.WithIssuer, so we do the check
+// manually after parsing: accept if iss equals cfg.Issuer, equals any entry
+// in AdditionalIssuers, or WildcardIssuers is true. An empty/missing iss is
+// always rejected.
+func (v *Verifier) checkIssuer(claims jwt.MapClaims) error {
+	iss, _ := claims["iss"].(string)
+	if iss == "" {
+		return errors.New("keycloak: token missing 'iss' claim")
+	}
+	if v.cfg.WildcardIssuers {
+		return nil
+	}
+	if iss == v.cfg.Issuer {
+		return nil
+	}
+	for _, allowed := range v.cfg.AdditionalIssuers {
+		if iss == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("keycloak: token issuer %q not in allowlist", iss)
 }
 
 func walk(claims jwt.MapClaims, path string) any {
