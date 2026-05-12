@@ -47,6 +47,17 @@ type KeycloakSettings struct {
 	RolesClaim   *string `access:"authentication_openid"` // telemetry: none
 	AdminRoles   *string `access:"authentication_openid"` // telemetry: none
 	DefaultRoles *string `access:"authentication_openid"` // telemetry: none
+
+	// Team name that JIT-provisioned users are auto-joined to after
+	// CreateUser. Empty (default) means no auto-join — preserves upstream
+	// behaviour. This exists because users created in Keycloak outside the
+	// chatapp `api-management` flow (terraform, kcadm, KC admin UI) reach
+	// MM via JIT without having been routed through api-management's
+	// resolveOrProvisionMmId, and therefore have no team membership. Without
+	// any team they show as `getMyTeams() == []` to chat clients, which
+	// hides every channel (including DMs, which are team-independent but
+	// still gated on the chat-store's loadChannels needing a teamId).
+	DefaultTeamName *string `access:"authentication_openid"` // telemetry: none
 }
 
 func (s *KeycloakSettings) SetDefaults() {
@@ -97,6 +108,9 @@ func (s *KeycloakSettings) SetDefaults() {
 	}
 	if s.DefaultRoles == nil {
 		s.DefaultRoles = NewPointer("system_user")
+	}
+	if s.DefaultTeamName == nil {
+		s.DefaultTeamName = NewPointer("")
 	}
 }
 

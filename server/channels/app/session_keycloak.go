@@ -330,7 +330,32 @@ func (a *App) findOrProvisionKeycloakUser(rctx request.CTX, claims *keycloakauth
 		return nil, appErr
 	}
 	rctx.Logger().Info("Provisioned Mattermost user from Keycloak JWT", mlog.String("user_id", created.Id), mlog.String("auth_data", authData))
+
+	// Auto-join the configured default team. Without this, KC-direct users
+	// (created via terraform / kcadm / KC admin UI rather than chatapp's
+	// api-management flow) reach MM via JIT with no team membership — and
+	// MM clients calling getMyTeams() come back empty, hiding every channel
+	// including DMs. The api-management /users POST path already adds team
+	// membership; this is the parity fix for the JIT path.
+	if teamName := derefStr(a.Config().KeycloakSettings.DefaultTeamName); teamName != "" {
+		team, teamErr := a.GetTeamByName(teamName)
+		if teamErr != nil {
+			rctx.Logger().Warn("Keycloak JIT: default team not found, skipping auto-join",
+				mlog.String("team_name", teamName), mlog.String("user_id", created.Id), mlog.Err(teamErr))
+		} else if _, joinErr := a.JoinUserToTeam(rctx, team, created, ""); joinErr != nil {
+			rctx.Logger().Warn("Keycloak JIT: failed to auto-join user to default team",
+				mlog.String("team_id", team.Id), mlog.String("user_id", created.Id), mlog.Err(joinErr))
+		}
+	}
+
 	return created, nil
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // rolesForJWTSession returns the role string to attach to the synthetic
