@@ -3993,6 +3993,7 @@ type Config struct {
 	ComplianceSettings          ComplianceSettings
 	LocalizationSettings        LocalizationSettings
 	SamlSettings                SamlSettings
+	KeycloakSettings            KeycloakSettings
 	NativeAppSettings           NativeAppSettings
 	IntuneSettings              IntuneSettings
 	CacheSettings               CacheSettings
@@ -4098,6 +4099,7 @@ func (o *Config) SetDefaults() {
 	o.GitLabSettings.setDefaults("", "", "", "", "")
 	o.GoogleSettings.setDefaults(GoogleSettingsDefaultScope, GoogleSettingsDefaultAuthEndpoint, GoogleSettingsDefaultTokenEndpoint, GoogleSettingsDefaultUserAPIEndpoint, "")
 	o.OpenIdSettings.setDefaults(OpenidSettingsDefaultScope, "", "", "", "#145DBF")
+	o.KeycloakSettings.SetDefaults()
 	o.ServiceSettings.SetDefaults(isUpdate)
 	o.PasswordSettings.SetDefaults()
 	o.TeamSettings.SetDefaults()
@@ -4184,6 +4186,10 @@ func (o *Config) IsValid() *AppError {
 	}
 
 	if appErr := o.SamlSettings.isValid(); appErr != nil {
+		return appErr
+	}
+
+	if appErr := o.KeycloakSettings.IsValid(); appErr != nil {
 		return appErr
 	}
 

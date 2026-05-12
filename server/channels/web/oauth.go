@@ -47,6 +47,10 @@ func (w *Web) InitOAuth() {
 	// Intune MAM authentication endpoint
 	w.MainRouter.Handle("/oauth/intune", w.APIHandler(loginByIntune)).Methods(http.MethodPost)
 
+	// Keycloak OIDC Back-Channel Logout endpoint (RFC OIDC Back-Channel Logout 1.0).
+	// Implemented in oauth_keycloak.go; gated on KeycloakSettings.Enable.
+	w.MainRouter.Handle("/oauth/keycloak/backchannel_logout", w.APIHandlerTrustRequester(handleKeycloakBackchannelLogout)).Methods(http.MethodPost)
+
 	// Old endpoints for backwards compatibility, needed to not break SSO for any old setups
 	w.MainRouter.Handle("/api/v3/oauth/{service:[A-Za-z0-9]+}/complete", w.APIHandler(completeOAuth)).Methods(http.MethodGet)
 	w.MainRouter.Handle("/signup/{service:[A-Za-z0-9]+}/complete", w.APIHandler(completeOAuth)).Methods(http.MethodGet)

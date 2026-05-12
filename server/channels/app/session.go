@@ -103,7 +103,11 @@ func (a *App) GetSession(token string) (*model.Session, *model.AppError) {
 
 	var appErr *model.AppError
 	if session == nil || session.Id == "" {
-		session, appErr = a.createSessionForUserAccessToken(rctx, token)
+		// Keycloak JWT bearer path (no-op when disabled or token isn't a JWT).
+		session, appErr = a.tryKeycloakJWTSession(rctx, token)
+		if session == nil && appErr == nil {
+			session, appErr = a.createSessionForUserAccessToken(rctx, token)
+		}
 		if appErr != nil {
 			return nil, model.NewAppError("GetSession", "api.context.invalid_token.error", map[string]any{"Token": token}, "", appErr.StatusCode).Wrap(appErr)
 		}
@@ -116,6 +120,7 @@ func (a *App) GetSession(token string) (*model.Session, *model.AppError) {
 	if *a.Config().ServiceSettings.SessionIdleTimeoutInMinutes > 0 &&
 		!session.IsOAuth && !session.IsMobileApp() &&
 		session.Props[model.SessionPropType] != model.SessionTypeUserAccessToken &&
+		!IsKeycloakJWTSession(session) &&
 		!*a.Config().ServiceSettings.ExtendSessionLengthWithActivity {
 		timeout := int64(*a.Config().ServiceSettings.SessionIdleTimeoutInMinutes) * 1000 * 60
 		if (model.GetMillis() - session.LastActivityAt) > timeout {

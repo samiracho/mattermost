@@ -441,9 +441,12 @@ func (a *App) authenticateUser(rctx request.CTX, user *model.User, password, mfa
 
 func ParseAuthTokenFromRequest(r *http.Request) (token string, loc TokenLocation) {
 	defer func() {
-		// Stripping off tokens of large sizes
-		// to prevent logging a large string.
-		if len(token) > 50 {
+		// Stripping off tokens of large sizes to prevent logging a large
+		// string. JWT-shaped tokens (3 dot-separated segments) are allowed
+		// through at full length so that the Keycloak JWT-bearer path in
+		// (*App).GetSession can verify them — see channels/app/session_keycloak.go.
+		// PATs are 26 chars and never trip this branch.
+		if len(token) > 50 && strings.Count(token, ".") != 2 {
 			token = token[:50]
 		}
 	}()
