@@ -72,34 +72,23 @@ func handleKeycloakBackchannelLogout(c *Context, w http.ResponseWriter, r *http.
 	}
 	auditRec.AddMeta("user_id", user.Id)
 
-	// Scope gating: a Keycloak backchannel logout_token can carry sub, sid,
-	// or both (OIDC Back-Channel Logout §2.4). We persist the user-wide
-	// "tokens not before" timestamp ONLY when the payload is sub-only,
-	// because that's KC's emission shape for the admin /users/:id/logout
-	// path (scope='all' / kick / disable / hard-delete). A sid-present
-	// payload — either sid-only (rejected earlier) or sub+sid — signals a
-	// single-session end_session and MUST NOT log the user out of other
-	// devices. For those, cache eviction alone (below) is correct: the
-	// signed-out device has already thrown away its tokens, so simply
-	// dropping its cached synthetic session is sufficient.
-	if claims.SID == "" {
-		nowMs := model.GetMillis()
-		if mErr := c.App.MarkKeycloakTokensRevoked(c.AppContext, user, nowMs); mErr != nil {
-			c.Logger.Warn("failed to mark keycloak tokens revoked", mlog.Err(mErr))
-		}
-		auditRec.AddMeta("revoked_at_ms", nowMs)
-	} else {
-		auditRec.AddMeta("scope", "single_session")
-	}
-
-	// ClearSessionCacheForUser purges all sessions for the user from the
-	// local cache and broadcasts ClusterEventClearSessionCacheForUser to
-	// peer nodes — so JWT-session entries get evicted cluster-wide. This
-	// also evicts PAT / regular sessions for the same user, which is fine:
-	// the persisted ones will be re-hydrated on the next request from the
-	// session store. Run AFTER the Props write so any request racing past
-	// the cache eviction re-mints via tryKeycloakJWTSession and sees the
-	// fresh Props value on its user lookup.
+	// Backchannel logout is cache-eviction ONLY. We deliberately do NOT
+	// persist the "tokens not before" timestamp here, because Keycloak fires
+	// a backchannel logout for *every* session-ending event (end_session,
+	// admin /users/:id/logout, idle/max session timeout) and — when
+	// backchannel.logout.session.required=false on the client — the emitted
+	// logout_token is always sub-only, with no way to tell single-session
+	// end_session apart from a user-wide kick. Treating every backchannel as
+	// user-wide locked out OTHER devices for the same user on every
+	// scope='this' logout (see incident 2026-05-13).
+	//
+	// User-wide token revocation now lives in a dedicated endpoint
+	// (handleKeycloakRevokeUserTokens) invoked directly by api-management
+	// when it knows the request is scope='all' / kick / disable / hard-delete.
+	// Backchannel still gets us instant MM-side cache eviction so the
+	// signed-out device's cached synthetic session drops immediately — that
+	// alone is safe for any logout shape because the device discarding the
+	// token plus cache eviction is sufficient for single-session logout.
 	c.App.ClearSessionCacheForUser(user.Id)
 
 	w.Header().Set("Cache-Control", "no-store")

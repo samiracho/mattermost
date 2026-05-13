@@ -9,9 +9,14 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 )
 
+// copythat fork: the upstream 200/250 free-tier cap blocks our load-test
+// seeds (USER_POOL_SIZE up to ~5000). Zeroing both constants disables the
+// check entirely — see isAtUserLimit() below, which returns false on
+// MaxUsersHardLimit == 0. We self-host MM without an enterprise license
+// and don't need the safety gate.
 const (
-	maxUsersLimit     = 200
-	maxUsersHardLimit = 250
+	maxUsersLimit     = 0
+	maxUsersHardLimit = 0
 )
 
 func (a *App) GetServerLimits() (*model.ServerLimits, *model.AppError) {
