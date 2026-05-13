@@ -1,0 +1,33 @@
+# Keep the build context small and cache-stable. The Dockerfile only needs
+# `server/` — exclude everything else.
+
+# VCS / editor / CI noise
+.git
+.github
+.gitignore
+.gitpod.yml
+.editorconfig
+.nvmrc
+.vscode
+.idea
+
+# Sibling repos / non-server source we never compile in this image
+webapp
+e2e-tests
+api
+tools
+
+# Top-level docs and licenses — webapp/upstream tarball already ships LICENSE
+*.md
+NOTICE.txt
+LICENSE.txt
+LICENSE.enterprise
+CODEOWNERS
+SECURITY.md
+
+# Server-tree noise that bloats context without affecting the build
+**/*_test.go
+**/testdata/
+**/node_modules/
+**/dist/
+**/build/
