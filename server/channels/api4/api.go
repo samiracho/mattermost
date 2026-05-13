@@ -363,6 +363,7 @@ func Init(srv *app.Server) (*API, error) {
 	api.InitWebSocket()
 	api.InitEmoji()
 	api.InitOAuth()
+	api.InitKeycloak()
 	api.InitReaction()
 	api.InitPlugin()
 	api.InitRole()
